@@ -4,6 +4,13 @@
 
 > 仅供个人学习与技术研究使用。请勿用于商业用途或侵犯版权，下载后请于 24 小时内删除。
 
+## 下载
+
+最新版本(免安装,双击即用):[v1.0.0 便携版](https://github.com/xilufei0721/anich-downloader/releases/latest)
+
+- 解压 zip 后双击 `AniChDownloader.exe` 即可,无需安装 Python
+- 首次运行若被杀毒软件拦截,选择「仍要运行」(Python 打包常见误报)
+
 ## 功能
 
 - 番剧搜索、剧集列表（AniCh API，内置多节点自动轮换）
