@@ -23,6 +23,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,6 +41,10 @@ BASE_URLS = [
     "https://api.emmmm.eu.org.cdn.cloudflare.net",
     "https://api.emmmm.eu.org",
 ]
+
+# Windows 下让子进程(curl / yt-dlp / N_m3u8DL-RE)不弹出黑色控制台窗口(GUI/windowed 场景)
+NO_WINDOW_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 
 
 def deobfuscate_url(value):
@@ -293,7 +298,8 @@ def _fetch_once(url, headers, timeout):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
-            if resp.status == 200 and body:
+            if resp.status == 200:
+                # 空 body 也是有效响应(如"搜索无结果"返回空 protobuf),不要误判为失败去走 curl 兜底
                 return resp.status, body
             urllib_result = (resp.status, body)
     except urllib.error.HTTPError as exc:
@@ -308,9 +314,9 @@ def _fetch_once(url, headers, timeout):
                  "--max-time", str(timeout), "-w", "\\n%{http_code}",
                  "-A", headers.get("User-Agent", ""), url],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                timeout=timeout * 2)
+                timeout=timeout * 2, creationflags=NO_WINDOW_FLAGS)
             if proc.returncode == 0:
-                body, _, tail = proc.stdout.rpartition(b"\\n")
+                body, _, tail = proc.stdout.rpartition(b"\n")
                 try:
                     code = int(tail.strip())
                 except ValueError:
@@ -322,13 +328,15 @@ def _fetch_once(url, headers, timeout):
     return urllib_result or (None, b"")
 
 
-def api_get(path, timeout=TIMEOUT):
-    """节点 x UA 变体轮询;全部节点都 404 才判定 ID/集数不存在。"""
+def api_get(path, timeout=TIMEOUT, retries=3, retry_delay=1.0):
+    """节点 x UA 变体轮询;对瞬时 HTTP 错误(403/429/5xx)自动重试,超时/连接失败不重试。
+    全部节点都 404 才判定 ID/集数不存在。"""
     variants = [
         {"User-Agent": USER_AGENT, "Accept": "*/*"},
         {"User-Agent": BROWSER_UA, "Accept": "*/*",
          "Referer": "https://www.bilibili.com/", "Origin": "https://www.bilibili.com"},
     ]
+    RETRYABLE = (403, 429, 500, 502, 503)
     saw_404 = 0
     saw_http = 0
     last_error = None
@@ -336,22 +344,32 @@ def api_get(path, timeout=TIMEOUT):
     for base in BASE_URLS:
         url = base.rstrip("/") + path
         for headers in variants:
-            print(f"  尝试 {url}", file=sys.stderr, flush=True)
-            code, body = _fetch_once(url, dict(headers), timeout)
-            if code == 200 and body:
-                print(f"    成功: {base}", file=sys.stderr)
-                return body
+            code = None
+            for attempt in range(retries):
+                print(f"  尝试 {url}" + (f"(第 {attempt + 1} 次)" if attempt else ""),
+                      file=sys.stderr, flush=True)
+                code, body = _fetch_once(url, dict(headers), timeout)
+                if code == 200:
+                    print(f"    成功: {base}", file=sys.stderr)
+                    return body
+                if code == 404:
+                    break
+                if code in RETRYABLE and attempt < retries - 1:
+                    print(f"    -> HTTP {code},稍后重试", file=sys.stderr)
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
+                break
             if code is not None:
-                print(f"    -> HTTP {code}", file=sys.stderr)
                 saw_http += 1
                 if code == 404:
                     saw_404 += 1
                 else:
+                    print(f"    -> HTTP {code}", file=sys.stderr)
                     last_error = f"{base}: HTTP {code}"
     if saw_http and saw_404 == saw_http:
         raise RuntimeError(f"接口返回 404,ID/集数可能不存在: {BASE_URLS[0]}{path}")
     if last_error:
-        raise RuntimeError(f"所有 API 节点请求失败(最后错误: {last_error})")
+        raise RuntimeError(f"所有 API 节点请求失败(最后错误: {last_error}),可能被限流,请稍后重试")
     raise RuntimeError("所有 API 节点均无响应(可能被网络/WAF 拦截)。")
 
 
@@ -487,6 +505,15 @@ def pick_name(bangumi_id, episode):
     return f"{bangumi_id}_{ep_s}"
 
 
+def make_writable(path):
+    """若目标文件已存在且为只读(常见于 Windows),清除只读属性,避免覆盖时 Permission denied。"""
+    try:
+        if os.path.exists(path):
+            os.chmod(path, 0o666)
+    except Exception:
+        pass
+
+
 def download_direct(url, out_path, referer):
     headers = {"User-Agent": BROWSER_UA}
     if referer:
@@ -499,17 +526,27 @@ def download_direct(url, out_path, referer):
             raise RuntimeError(f"该线路返回了 {ctype},不是视频直链,请用 play 换一条线路。")
         total = int(resp.headers.get("Content-Length") or 0)
         done = 0
-        with open(out_path, "wb") as fh:
-            while True:
-                chunk = resp.read(1 << 16)
-                if not chunk:
-                    break
-                fh.write(chunk)
-                done += len(chunk)
-                if total:
-                    print(f"\r  已下载 {done / 1048576:.1f} / {total / 1048576:.1f} MB "
-                          f"({done * 100 // total}%)", end="", file=sys.stderr, flush=True)
-        print(file=sys.stderr)
+        tmp_path = out_path + ".part"
+        try:
+            with open(tmp_path, "wb") as fh:
+                while True:
+                    chunk = resp.read(1 << 16)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    done += len(chunk)
+                    if total:
+                        print(f"\r  已下载 {done / 1048576:.1f} / {total / 1048576:.1f} MB "
+                              f"({done * 100 // total}%)", end="", file=sys.stderr, flush=True)
+            print(file=sys.stderr)
+            make_writable(out_path)
+            os.replace(tmp_path, out_path)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
 
 
 def download_hls(url, out_dir, name, referer):
@@ -520,7 +557,7 @@ def download_hls(url, out_dir, name, referer):
         if referer:
             cmd += ["--header", f"Referer: {referer}"]
         print("使用 N_m3u8DL-RE 下载...")
-        rc = subprocess.run(cmd)
+        rc = subprocess.run(cmd, creationflags=NO_WINDOW_FLAGS)
         if rc.returncode != 0:
             raise RuntimeError(f"N_m3u8DL-RE 下载失败(退出码 {rc.returncode})。")
         return
@@ -533,7 +570,7 @@ def download_hls(url, out_dir, name, referer):
             cmd += ["--referer", referer]
         cmd.append(url)
         print("使用 yt-dlp 下载...")
-        rc = subprocess.run(cmd)
+        rc = subprocess.run(cmd, creationflags=NO_WINDOW_FLAGS)
         if rc.returncode != 0:
             raise RuntimeError(f"yt-dlp 下载失败(退出码 {rc.returncode})。")
         return

@@ -53,6 +53,23 @@ def sanitize(name):
     return re.sub(r'[\\/:*?"<>|\r\n]+', "_", str(name)).strip() or "output"
 
 
+def place_file(tmp_path, out_path):
+    """把已下载的临时文件移动到最终文件名;自动清除只读属性,失败时给出明确原因。"""
+    api.make_writable(out_path)
+    try:
+        os.replace(tmp_path, out_path)
+    except PermissionError as exc:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"无法写入文件: {out_path}\n"
+            f"可能原因:文件正被占用(播放器/杀毒扫描)、只读、或无权限。\n"
+            f"请关闭占用该文件的程序,或换个保存目录后重试。({exc})")
+
+
+
 def enable_dark_titlebar(root):
     try:
         hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
@@ -134,19 +151,28 @@ class DownloadWorker(threading.Thread):
                 raise RuntimeError("返回的不是视频数据(可能是防盗链页面)")
             total = int(resp.headers.get("Content-Length") or 0)
             done = 0
-            with open(out_path, "wb") as fh:
-                while True:
-                    if self.stop.is_set():
-                        return
-                    chunk = resp.read(1 << 16)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    done += len(chunk)
-                    if total:
-                        self.prog(done / total, f"{done / 1048576:.1f} / {total / 1048576:.1f} MB")
-            if total and done < total:
-                raise RuntimeError("下载不完整")
+            tmp_path = out_path + ".part"
+            try:
+                with open(tmp_path, "wb") as fh:
+                    while True:
+                        if self.stop.is_set():
+                            return
+                        chunk = resp.read(1 << 16)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            self.prog(done / total, f"{done / 1048576:.1f} / {total / 1048576:.1f} MB")
+                if total and done < total:
+                    raise RuntimeError("下载不完整")
+                place_file(tmp_path, out_path)
+            except Exception:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+                raise
 
     def _download_hls(self, url, out_dir, name):
         yt = shutil.which("yt-dlp")
@@ -157,7 +183,8 @@ class DownloadWorker(threading.Thread):
                "--add-header", "User-Agent: " + BROWSER_UA,
                "--referer", REFERER, url]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, encoding="utf-8", errors="replace")
+                                text=True, encoding="utf-8", errors="replace",
+                                creationflags=api.NO_WINDOW_FLAGS)
         assert proc.stdout is not None
         for line in proc.stdout:
             if self.stop.is_set():
@@ -442,6 +469,18 @@ class App:
             os.makedirs(out_dir, exist_ok=True)
         except Exception as exc:
             messagebox.showerror("错误", f"无法创建输出目录: {exc}")
+            return
+        # 提前验证目录可写,避免下载时每条线路都报 Permission denied
+        try:
+            probe = os.path.join(out_dir, f".write_test_{os.getpid()}.tmp")
+            with open(probe, "w") as fh:
+                fh.write("ok")
+            os.remove(probe)
+        except Exception as exc:
+            messagebox.showerror(
+                "错误",
+                f"输出目录不可写: {out_dir}\n{exc}\n\n"
+                f"可能原因:目录只读/被占用/无权限,或磁盘已满。\n请换个保存位置后重试。")
             return
         line_index = 0
         if self.lines:
