@@ -6,17 +6,20 @@
 
 ## 下载
 
-最新版本(免安装,双击即用):[v1.0.0 便携版](https://github.com/xilufei0721/anich-downloader/releases/latest)
+最新版（免安装，双击即用）：[便携版 zip](https://github.com/xilufei0721/anich-downloader/releases/latest)
 
-- 解压 zip 后双击 `AniChDownloader.exe` 即可,无需安装 Python
-- 首次运行若被杀毒软件拦截,选择「仍要运行」(Python 打包常见误报)
+- 解压 zip 后双击 `AniChDownloader.exe` 即可，无需安装 Python
+- 首次运行若被杀毒软件拦截，选择「仍要运行」（Python 打包常见误报）
+- 历史版本见 [Releases](https://github.com/xilufei0721/anich-downloader/releases)
 
 ## 功能
 
 - 番剧搜索、剧集列表（AniCh API，内置多节点自动轮换）
+- 请求失败自动重试（403/429/5xx），限流时给出明确提示
 - 视频线路解析（自动解码新版 API 的 protobuf 字节数组响应与混淆 base64）
 - 批量下载：多选集 + 线路失效自动切换下一条
-- 支持 mp4 直链下载；m3u8 线路自动调用 yt-dlp
+- 下载使用临时文件原子替换，修复文件被占用/只读导致的失败；输出目录写入预检
+- 支持 mp4 直链下载；m3u8 线路自动调用 yt-dlp（子进程静默运行，不弹黑框）
 - 图形界面（tkinter，纯标准库，无需第三方依赖）
 - 一键打包为独立 exe，可分发到未安装 Python 的电脑
 
@@ -40,10 +43,10 @@ pythonw anich_gui.pyw
 ### 方式二：命令行
 
 ```powershell
-python anich_dl.py search "葬送的芙莉莲"   # 搜索番剧,得到 ID
+python anich_dl.py search "葬送的芙莉莲"   # 搜索番剧，得到 ID
 python anich_dl.py episodes 32339         # 列出剧集
 python anich_dl.py play 32339 1           # 查看某集全部线路
-python anich_dl.py download 32339 1 --line 1   # 下载(第 1 条线路)
+python anich_dl.py download 32339 1 --line 1   # 下载（第 1 条线路）
 ```
 
 ### 打包为 exe
